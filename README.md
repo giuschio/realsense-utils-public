@@ -1,6 +1,17 @@
 # realsense_utils2
+A small set of utils I made for interacting with a realsense d435 camera. Ideally, you can just: 
+```python
+from realsense_utils2 import SceneCamera
 
-`realsense_utils2` provides a lightweight RealSense camera class with optional depth-model integration.
+camera = SceneCamera(resolution=(1280, 720))
+color, depth = cam.capture()
+
+# or use the context-manager
+with SceneCamera(resolution=(1280, 720)) as cam:
+    color, depth = cam.capture()
+```
+
+The package optionally integrates a deep learned camera depth model that takes as input the realsense depth and outputs an improved depthmap. See below for instructions on how to use it.
 
 ## Install
 
