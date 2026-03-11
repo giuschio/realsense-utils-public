@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "realsense_utils2"
+version = "0.1.0"
+description = "Utilities for Intel RealSense workflows."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Your Name" }
+]
+dependencies = [
+  "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+camera = [
+  "pyrealsense2",
+]
+depth-model = [
+  "torch",
+]
+all = [
+  "pyrealsense2",
+  "torch",
+]
+
+[project.urls]
+Homepage = "https://github.com/giuschio/realsense-utils-public"
+Repository = "https://github.com/giuschio/realsense-utils-public"
+Issues = "https://github.com/giuschio/realsense-utils-public/issues"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

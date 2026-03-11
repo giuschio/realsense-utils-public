@@ -1,0 +1,3 @@
+[submodule "submodules/camera_depth_models"]
+	path = submodules/camera_depth_models
+	url = git@github.com:giuschio/camera_depth_models.git
