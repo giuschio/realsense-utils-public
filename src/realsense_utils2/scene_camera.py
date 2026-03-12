@@ -2,9 +2,45 @@
 
 from __future__ import annotations
 
+import gc
 from typing import Any, Optional
 
 import numpy as np
+
+
+def _clear_torch_cache() -> None:
+    """Release Python references and return unused CUDA memory to the allocator."""
+    gc.collect()
+    try:
+        import torch
+    except ImportError:
+        return
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+class ManagedDepthModel:
+    """Thin lifecycle wrapper around the optional camera depth refinement model."""
+
+    def __init__(self, model: Any, preferred_device: str) -> None:
+        self.model = model
+        self.preferred_device = preferred_device
+
+    @property
+    def device(self) -> str:
+        return str(self.model.device)
+
+    def infer_depth(self, color: np.ndarray, depth: np.ndarray) -> np.ndarray:
+        return self.model.infer_depth(color, depth)
+
+    def park(self) -> None:
+        self.model = self.model.to("cpu").eval()
+        _clear_torch_cache()
+
+    def use(self, device: Optional[str] = None) -> None:
+        target_device = device or self.preferred_device
+        self.model = self.model.to(target_device).eval()
 
 
 class SceneCamera:
@@ -94,7 +130,8 @@ class SceneCamera:
             ) from exc
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        return load_model("vitl", model_path, device)
+        model = load_model("vitl", model_path, device)
+        return ManagedDepthModel(model=model, preferred_device=device)
 
     def initialize(self) -> None:
         """Start RealSense streams and cache alignment, scale, and intrinsics."""
@@ -160,6 +197,17 @@ class SceneCamera:
         if self.pipeline:
             self.pipeline.stop()
             self.pipeline = None
+
+    def park_depth_model(self) -> None:
+        """Move the optional depth model to CPU and release unused CUDA cache."""
+        if self.cdm is not None:
+            self.cdm.park()
+
+    def use_depth_model(self, device: Optional[str] = None) -> None:
+        """Move the optional depth model back to its preferred device."""
+        if self.cdm is None:
+            raise RuntimeError("No camera depth model is configured.")
+        self.cdm.use(device=device)
 
     def __enter__(self) -> "SceneCamera":
         """Context-manager entry; returns this camera instance."""
