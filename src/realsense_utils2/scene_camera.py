@@ -31,7 +31,7 @@ class SceneCamera:
         self.pipeline = None
         self.frame_align = None
         self.depth_scale = None
-        self.color_intrinsics: Optional[dict[str, float]] = None
+        self._color_intrinsics: Optional[dict[str, float]] = None
         self.cdm = None
         self.resolution = resolution
 
@@ -53,6 +53,25 @@ class SceneCamera:
         if self.color_intrinsics is None:
             raise RuntimeError("Camera is not initialized.")
         return int(self.color_intrinsics["height"])
+
+    @property
+    def color_intrinsics(self) -> Optional[dict[str, float]]:
+        """Return cached color intrinsics as a dictionary."""
+        return self._color_intrinsics
+
+    @property
+    def camera_matrix(self) -> np.ndarray:
+        """Return 3x3 color camera intrinsic matrix."""
+        if self.color_intrinsics is None:
+            raise RuntimeError("Camera is not initialized.")
+        return np.array(
+            [
+                [self.color_intrinsics["fx"], 0.0, self.color_intrinsics["cx"]],
+                [0.0, self.color_intrinsics["fy"], self.color_intrinsics["cy"]],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
 
     def _load_camera_depth_model(self, model_path: str) -> Any:
         """Load and return the optional camera depth refinement model."""
@@ -101,7 +120,7 @@ class SceneCamera:
             .as_video_stream_profile()
             .get_intrinsics()
         )
-        self.color_intrinsics = {
+        self._color_intrinsics = {
             "fx": color_sensor.fx,
             "fy": color_sensor.fy,
             "cx": color_sensor.ppx,
