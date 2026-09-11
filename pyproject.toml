@@ -23,9 +23,32 @@ camera = [
 depth-model = [
   "torch",
 ]
+foundation-stereo = [
+  "torch",
+  "timm",
+  "einops",
+  "omegaconf",
+  "scipy",
+  "scikit-image",
+  "opencv-contrib-python",
+  "imageio",
+  "pyyaml",
+]
+visualization = [
+  "open3d",
+]
 all = [
   "pyrealsense2",
   "torch",
+  "timm",
+  "einops",
+  "omegaconf",
+  "scipy",
+  "scikit-image",
+  "opencv-contrib-python",
+  "imageio",
+  "pyyaml",
+  "open3d",
 ]
 
 [project.urls]
