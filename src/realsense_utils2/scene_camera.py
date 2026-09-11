@@ -1,11 +1,32 @@
-"""Lightweight RealSense scene camera wrapper."""
+"""RealSense scene camera wrappers."""
 
 from __future__ import annotations
 
 import gc
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
+
+from .foundation_stereo_model import (
+    DEFAULT_FOUNDATION_STEREO_WEIGHTS,
+    ManagedFoundationStereo,
+)
+from .projection import (
+    CameraExtrinsics,
+    CameraIntrinsics,
+    reproject_depth_to_color_torch,
+    source_depth_to_color_points,
+)
+
+
+DEFAULT_CAMERA_DEPTH_MODEL_WEIGHTS = (
+    Path(__file__).resolve().parents[2]
+    / "submodules"
+    / "camera_depth_models"
+    / "weights"
+    / "model.ckpt"
+)
 
 
 def _clear_torch_cache() -> None:
@@ -43,104 +64,71 @@ class ManagedDepthModel:
         self.model = self.model.to(target_device).eval()
 
 
-class SceneCamera:
-    """Simple color+depth capture helper for Intel RealSense devices.
+class SceneCameraBase:
+    """Common context-manager and RealSense lifecycle helpers."""
 
-    Notes:
-        Color frames are configured as ``rs.format.bgr8`` and returned in BGR order.
-        Depth frames are returned in meters as ``float32``.
-    """
-
-    def __init__(
-        self,
-        camera_depth_model: Optional[str] = None,
-        resolution: tuple[int, int] = (1280, 720),
-    ):
-        """Initialize the camera pipeline and optional depth refinement model.
-
-        Args:
-            camera_depth_model: Optional checkpoint/path used by
-                ``camera_depth_models.load_model``. If provided, raw depth is
-                refined on each ``capture()`` call.
-            resolution: Requested ``(width, height)`` for both color and depth streams.
-        """
+    def __init__(self, resolution: tuple[int, int] = (1280, 720)) -> None:
         self.pipeline = None
-        self.frame_align = None
-        self.depth_scale = None
-        self._color_intrinsics: Optional[dict[str, float]] = None
-        self.cdm = None
         self.resolution = resolution
-
+        self._color_intrinsics: Optional[CameraIntrinsics] = None
         self.initialize()
-
-        if camera_depth_model is not None:
-            self.cdm = self._load_camera_depth_model(camera_depth_model)
 
     @property
     def width(self) -> int:
-        """Return active color stream width in pixels."""
         if self.color_intrinsics is None:
             raise RuntimeError("Camera is not initialized.")
-        return int(self.color_intrinsics["width"])
+        return self.color_intrinsics.width
 
     @property
     def height(self) -> int:
-        """Return active color stream height in pixels."""
         if self.color_intrinsics is None:
             raise RuntimeError("Camera is not initialized.")
-        return int(self.color_intrinsics["height"])
+        return self.color_intrinsics.height
 
     @property
-    def color_intrinsics(self) -> Optional[dict[str, float]]:
-        """Return cached color intrinsics as a dictionary."""
+    def color_intrinsics(self) -> Optional[CameraIntrinsics]:
         return self._color_intrinsics
 
     @property
     def camera_matrix(self) -> np.ndarray:
-        """Return 3x3 color camera intrinsic matrix."""
         if self.color_intrinsics is None:
             raise RuntimeError("Camera is not initialized.")
-        return np.array(
-            [
-                [self.color_intrinsics["fx"], 0.0, self.color_intrinsics["cx"]],
-                [0.0, self.color_intrinsics["fy"], self.color_intrinsics["cy"]],
-                [0.0, 0.0, 1.0],
-            ],
-            dtype=np.float64,
-        )
-
-    def _load_camera_depth_model(self, model_path: str) -> Any:
-        """Load and return the optional camera depth refinement model."""
-        try:
-            import torch
-        except ImportError as exc:
-            raise ImportError(
-                "camera_depth_model requires 'torch'. Install with: "
-                "pip install 'realsense_utils2[depth-model]'"
-            ) from exc
-
-        try:
-            from camera_depth_models import load_model
-        except ImportError as exc:
-            raise ImportError(
-                "camera_depth_model requires 'camera_depth_models'. Install with: "
-                "git submodule update --init --recursive && "
-                "pip install -e ./submodules/camera_depth_models "
-                "(then follow the submodule README for checkpoints)."
-            ) from exc
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = load_model("vitl", model_path, device)
-        return ManagedDepthModel(model=model, preferred_device=device)
+        return self.color_intrinsics.matrix()
 
     def initialize(self) -> None:
-        """Start RealSense streams and cache alignment, scale, and intrinsics."""
+        raise NotImplementedError
+
+    def capture(self) -> tuple[np.ndarray, np.ndarray]:
+        raise NotImplementedError
+
+    def finalize(self) -> None:
+        """Stop the pipeline if running and release the handle."""
+        if self.pipeline:
+            self.pipeline.stop()
+            self.pipeline = None
+
+    def __enter__(self) -> "SceneCameraBase":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.finalize()
+
+
+class SceneCameraRaw(SceneCameraBase):
+    """Color + native RealSense depth aligned into the color frame."""
+
+    def __init__(self, resolution: tuple[int, int] = (1280, 720)) -> None:
+        self.frame_align = None
+        self.depth_scale = None
+        super().__init__(resolution=resolution)
+
+    def initialize(self) -> None:
         try:
             import pyrealsense2 as rs
         except ImportError as exc:
             raise ImportError(
-                "SceneCamera requires 'pyrealsense2'. Install it, or install package "
-                "camera dependencies when available for your platform."
+                "SceneCameraRaw requires 'pyrealsense2'. Install with: "
+                "pip install 'realsense_utils2[camera]'"
             ) from exc
 
         self.pipeline = rs.pipeline()
@@ -149,70 +137,247 @@ class SceneCamera:
         config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, 30)
         config.enable_stream(rs.stream.depth, width, height, rs.format.z16, 30)
         profile = self.pipeline.start(config)
+
         self.frame_align = rs.align(rs.stream.color)
         self.depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
-
-        color_sensor = (
+        self._color_intrinsics = CameraIntrinsics.from_realsense(
             profile.get_stream(rs.stream.color)
             .as_video_stream_profile()
             .get_intrinsics()
         )
-        self._color_intrinsics = {
-            "fx": color_sensor.fx,
-            "fy": color_sensor.fy,
-            "cx": color_sensor.ppx,
-            "cy": color_sensor.ppy,
-            "width": color_sensor.width,
-            "height": color_sensor.height,
-        }
 
     def capture(self) -> tuple[np.ndarray, np.ndarray]:
-        """Capture one aligned color/depth pair.
-
-        Returns:
-            A tuple ``(color, depth)`` where:
-            - ``color`` is a ``uint8`` BGR image with shape ``(H, W, 3)``.
-            - ``depth`` is a ``float32`` depth map in meters with shape ``(H, W)``.
-        """
-        if self.pipeline is None or self.frame_align is None or self.depth_scale is None:
+        if (
+            self.pipeline is None
+            or self.frame_align is None
+            or self.depth_scale is None
+        ):
             raise RuntimeError("Camera is not initialized.")
 
         frames = self.pipeline.wait_for_frames()
         aligned_frames = self.frame_align.process(frames)
 
-        color = np.asanyarray(aligned_frames.get_color_frame().get_data())
+        color_frame = aligned_frames.get_color_frame()
+        depth_frame = aligned_frames.get_depth_frame()
+        if not color_frame or not depth_frame:
+            raise RuntimeError("Failed to capture aligned color/depth frames.")
+
+        color = np.asanyarray(color_frame.get_data())
         depth = (
-            np.asanyarray(aligned_frames.get_depth_frame().get_data()).astype(np.float32)
+            np.asanyarray(depth_frame.get_data()).astype(np.float32)
             * self.depth_scale
         )
+        return np.copy(color), np.copy(depth)
 
-        # Return detached arrays, so upstream operations can't mutate frame-backed memory.
-        color, depth = np.copy(color), np.copy(depth)
-        if self.cdm is not None:
-            depth = self.cdm.infer_depth(color, depth)
-        return color, depth
 
-    def finalize(self) -> None:
-        """Stop the pipeline if running and release the handle."""
-        if self.pipeline:
-            self.pipeline.stop()
-            self.pipeline = None
+class SceneCameraCDM(SceneCameraRaw):
+    """Color + RealSense depth refined by camera_depth_models."""
+
+    def __init__(
+        self,
+        camera_depth_model: str | Path = DEFAULT_CAMERA_DEPTH_MODEL_WEIGHTS,
+        resolution: tuple[int, int] = (1280, 720),
+    ) -> None:
+        self.cdm: Optional[ManagedDepthModel] = None
+        super().__init__(resolution=resolution)
+        self.cdm = self._load_camera_depth_model(str(camera_depth_model))
+
+    def _load_camera_depth_model(self, model_path: str) -> ManagedDepthModel:
+        try:
+            import torch
+        except ImportError as exc:
+            raise ImportError(
+                "SceneCameraCDM requires 'torch'. Install with: "
+                "pip install 'realsense_utils2[depth-model]'"
+            ) from exc
+
+        if not Path(model_path).exists():
+            raise FileNotFoundError(
+                f"Camera depth model weights not found: {model_path}"
+            )
+
+        try:
+            from camera_depth_models import load_model
+        except ImportError as exc:
+            raise ImportError(
+                "SceneCameraCDM requires 'camera_depth_models'. Install with: "
+                "git submodule update --init --recursive && "
+                "pip install -e ./submodules/camera_depth_models"
+            ) from exc
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = load_model("vitl", model_path, device)
+        return ManagedDepthModel(model=model, preferred_device=device)
+
+    def capture(self) -> tuple[np.ndarray, np.ndarray]:
+        color, depth = super().capture()
+        if self.cdm is None:
+            raise RuntimeError("No camera depth model is configured.")
+        return color, self.cdm.infer_depth(color, depth)
 
     def park_depth_model(self) -> None:
-        """Move the optional depth model to CPU and release unused CUDA cache."""
         if self.cdm is not None:
             self.cdm.park()
 
     def use_depth_model(self, device: Optional[str] = None) -> None:
-        """Move the optional depth model back to its preferred device."""
         if self.cdm is None:
             raise RuntimeError("No camera depth model is configured.")
         self.cdm.use(device=device)
 
-    def __enter__(self) -> "SceneCamera":
-        """Context-manager entry; returns this camera instance."""
-        return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
-        """Context-manager exit; always finalizes the camera pipeline."""
-        self.finalize()
+class SceneCameraFDM(SceneCameraBase):
+    """Color + FoundationStereo depth projected into the color frame."""
+
+    def __init__(
+        self,
+        foundation_depth_model: str | Path = DEFAULT_FOUNDATION_STEREO_WEIGHTS,
+        resolution: tuple[int, int] = (1280, 720),
+        fdm_scale: float = 0.5,
+        valid_iters: int = 8,
+        max_disp: int = 192,
+        device: Optional[str] = None,
+    ) -> None:
+        self.left_intrinsics: Optional[CameraIntrinsics] = None
+        self.color_intrinsics_for_projection: Optional[CameraIntrinsics] = None
+        self.left_to_color: Optional[CameraExtrinsics] = None
+        self.baseline_m: Optional[float] = None
+        self.fdm_scale = fdm_scale
+        self.device = device
+        self.fdm: Optional[ManagedFoundationStereo] = None
+        super().__init__(resolution=resolution)
+        try:
+            self.fdm = ManagedFoundationStereo(
+                model_path=foundation_depth_model,
+                preferred_device=device,
+                valid_iters=valid_iters,
+                max_disp=max_disp,
+                scale=fdm_scale,
+            )
+        except Exception:
+            self.finalize()
+            raise
+
+    def initialize(self) -> None:
+        try:
+            import pyrealsense2 as rs
+        except ImportError as exc:
+            raise ImportError(
+                "SceneCameraFDM requires 'pyrealsense2'. Install with: "
+                "pip install 'realsense_utils2[camera]'"
+            ) from exc
+
+        self.pipeline = rs.pipeline()
+        config = rs.config()
+        width, height = self.resolution
+        config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, 30)
+        config.enable_stream(rs.stream.infrared, 1, width, height, rs.format.y8, 30)
+        config.enable_stream(rs.stream.infrared, 2, width, height, rs.format.y8, 30)
+        profile = self.pipeline.start(config)
+
+        color_profile = profile.get_stream(rs.stream.color).as_video_stream_profile()
+        left_profile = profile.get_stream(
+            rs.stream.infrared, 1
+        ).as_video_stream_profile()
+        right_profile = profile.get_stream(
+            rs.stream.infrared, 2
+        ).as_video_stream_profile()
+
+        self._color_intrinsics = CameraIntrinsics.from_realsense(
+            color_profile.get_intrinsics()
+        )
+        self.color_intrinsics_for_projection = self._color_intrinsics
+        self.left_intrinsics = CameraIntrinsics.from_realsense(
+            left_profile.get_intrinsics()
+        )
+        self.left_to_color = CameraExtrinsics.from_realsense(
+            left_profile.get_extrinsics_to(color_profile)
+        )
+        left_to_right = CameraExtrinsics.from_realsense(
+            left_profile.get_extrinsics_to(right_profile)
+        )
+        self.baseline_m = float(abs(left_to_right.translation[0]))
+        if self.baseline_m <= 0.0:
+            raise RuntimeError("Invalid RealSense stereo baseline.")
+
+    def capture(self) -> tuple[np.ndarray, np.ndarray]:
+        if (
+            self.pipeline is None
+            or self.left_intrinsics is None
+            or self.color_intrinsics_for_projection is None
+            or self.left_to_color is None
+            or self.baseline_m is None
+            or self.fdm is None
+        ):
+            raise RuntimeError("Camera is not initialized.")
+
+        frames = self.pipeline.wait_for_frames()
+        color_frame = frames.get_color_frame()
+        left_frame = frames.get_infrared_frame(1)
+        right_frame = frames.get_infrared_frame(2)
+        if not color_frame or not left_frame or not right_frame:
+            raise RuntimeError("Failed to capture color/IR stereo frames.")
+
+        color = np.copy(np.asanyarray(color_frame.get_data()))
+        left = np.copy(np.asanyarray(left_frame.get_data()))
+        right = np.copy(np.asanyarray(right_frame.get_data()))
+
+        scaled_left_intrinsics = self.left_intrinsics.scaled(self.fdm_scale)
+        depth_left = self.fdm.infer_depth(
+            left=left,
+            right=right,
+            fx=scaled_left_intrinsics.fx,
+            baseline_m=self.baseline_m,
+        )
+        depth_color = reproject_depth_to_color_torch(
+            depth_m=depth_left,
+            source_intrinsics=scaled_left_intrinsics,
+            color_intrinsics=self.color_intrinsics_for_projection,
+            source_to_color=self.left_to_color,
+            device=self.device or self.fdm.device,
+        )
+        return color, depth_color
+
+    def capture_pointcloud(self) -> tuple[np.ndarray, np.ndarray]:
+        """Capture an FDM cloud directly, colorized from the RGB stream."""
+        if (
+            self.pipeline is None
+            or self.left_intrinsics is None
+            or self.color_intrinsics_for_projection is None
+            or self.left_to_color is None
+            or self.baseline_m is None
+            or self.fdm is None
+        ):
+            raise RuntimeError("Camera is not initialized.")
+
+        frames = self.pipeline.wait_for_frames()
+        color_frame = frames.get_color_frame()
+        left_frame = frames.get_infrared_frame(1)
+        right_frame = frames.get_infrared_frame(2)
+        if not color_frame or not left_frame or not right_frame:
+            raise RuntimeError("Failed to capture color/IR stereo frames.")
+
+        color = np.copy(np.asanyarray(color_frame.get_data()))
+        left = np.copy(np.asanyarray(left_frame.get_data()))
+        right = np.copy(np.asanyarray(right_frame.get_data()))
+
+        scaled_left_intrinsics = self.left_intrinsics.scaled(self.fdm_scale)
+        depth_left = self.fdm.infer_depth(
+            left=left,
+            right=right,
+            fx=scaled_left_intrinsics.fx,
+            baseline_m=self.baseline_m,
+        )
+        return source_depth_to_color_points(
+            depth_m=depth_left,
+            color_bgr=color,
+            source_intrinsics=scaled_left_intrinsics,
+            color_intrinsics=self.color_intrinsics_for_projection,
+            source_to_color=self.left_to_color,
+        )
+
+    def park_depth_model(self) -> None:
+        self.fdm.park()
+        _clear_torch_cache()
+
+    def use_depth_model(self, device: Optional[str] = None) -> None:
+        self.fdm.use(device=device)
