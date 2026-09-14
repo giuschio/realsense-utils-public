@@ -67,9 +67,15 @@ class ManagedDepthModel:
 class SceneCameraBase:
     """Common context-manager and RealSense lifecycle helpers."""
 
-    def __init__(self, resolution: tuple[int, int] = (1280, 720)) -> None:
+    def __init__(
+        self,
+        resolution: tuple[int, int] = (1280, 720),
+        visual_preset: Optional[str] = "high_density",
+    ) -> None:
         self.pipeline = None
         self.resolution = resolution
+        self.visual_preset = visual_preset
+        self.depth_visual_preset: Optional[float] = None
         self._color_intrinsics: Optional[CameraIntrinsics] = None
         self.initialize()
 
@@ -101,6 +107,30 @@ class SceneCameraBase:
     def capture(self) -> tuple[np.ndarray, np.ndarray]:
         raise NotImplementedError
 
+    def _apply_visual_preset(self, rs: Any, depth_sensor: Any) -> None:
+        """Apply an RS400 visual preset when the connected sensor supports it."""
+        if self.visual_preset is None:
+            return
+        if not depth_sensor.supports(rs.option.visual_preset):
+            return
+
+        try:
+            preset = getattr(rs.rs400_visual_preset, self.visual_preset)
+        except AttributeError as exc:
+            raise ValueError(
+                f"Unknown RealSense RS400 visual preset: {self.visual_preset!r}"
+            ) from exc
+
+        try:
+            preset_value = float(preset)
+        except TypeError:
+            if self.visual_preset != "high_density":
+                raise
+            preset_value = 4.0
+
+        depth_sensor.set_option(rs.option.visual_preset, preset_value)
+        self.depth_visual_preset = depth_sensor.get_option(rs.option.visual_preset)
+
     def finalize(self) -> None:
         """Stop the pipeline if running and release the handle."""
         if self.pipeline:
@@ -117,10 +147,14 @@ class SceneCameraBase:
 class SceneCameraRaw(SceneCameraBase):
     """Color + native RealSense depth aligned into the color frame."""
 
-    def __init__(self, resolution: tuple[int, int] = (1280, 720)) -> None:
+    def __init__(
+        self,
+        resolution: tuple[int, int] = (1280, 720),
+        visual_preset: Optional[str] = "high_density",
+    ) -> None:
         self.frame_align = None
         self.depth_scale = None
-        super().__init__(resolution=resolution)
+        super().__init__(resolution=resolution, visual_preset=visual_preset)
 
     def initialize(self) -> None:
         try:
@@ -139,7 +173,9 @@ class SceneCameraRaw(SceneCameraBase):
         profile = self.pipeline.start(config)
 
         self.frame_align = rs.align(rs.stream.color)
-        self.depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
+        depth_sensor = profile.get_device().first_depth_sensor()
+        self.depth_scale = depth_sensor.get_depth_scale()
+        self._apply_visual_preset(rs, depth_sensor)
         self._color_intrinsics = CameraIntrinsics.from_realsense(
             profile.get_stream(rs.stream.color)
             .as_video_stream_profile()
@@ -177,9 +213,10 @@ class SceneCameraCDM(SceneCameraRaw):
         self,
         camera_depth_model: str | Path = DEFAULT_CAMERA_DEPTH_MODEL_WEIGHTS,
         resolution: tuple[int, int] = (1280, 720),
+        visual_preset: Optional[str] = "high_density",
     ) -> None:
         self.cdm: Optional[ManagedDepthModel] = None
-        super().__init__(resolution=resolution)
+        super().__init__(resolution=resolution, visual_preset=visual_preset)
         self.cdm = self._load_camera_depth_model(str(camera_depth_model))
 
     def _load_camera_depth_model(self, model_path: str) -> ManagedDepthModel:
@@ -236,6 +273,7 @@ class SceneCameraFDM(SceneCameraBase):
         valid_iters: int = 8,
         max_disp: int = 192,
         device: Optional[str] = None,
+        visual_preset: Optional[str] = "high_density",
     ) -> None:
         self.left_intrinsics: Optional[CameraIntrinsics] = None
         self.color_intrinsics_for_projection: Optional[CameraIntrinsics] = None
@@ -244,7 +282,7 @@ class SceneCameraFDM(SceneCameraBase):
         self.fdm_scale = fdm_scale
         self.device = device
         self.fdm: Optional[ManagedFoundationStereo] = None
-        super().__init__(resolution=resolution)
+        super().__init__(resolution=resolution, visual_preset=visual_preset)
         try:
             self.fdm = ManagedFoundationStereo(
                 model_path=foundation_depth_model,
@@ -273,6 +311,7 @@ class SceneCameraFDM(SceneCameraBase):
         config.enable_stream(rs.stream.infrared, 1, width, height, rs.format.y8, 30)
         config.enable_stream(rs.stream.infrared, 2, width, height, rs.format.y8, 30)
         profile = self.pipeline.start(config)
+        self._apply_visual_preset(rs, profile.get_device().first_depth_sensor())
 
         color_profile = profile.get_stream(rs.stream.color).as_video_stream_profile()
         left_profile = profile.get_stream(
@@ -381,3 +420,6 @@ class SceneCameraFDM(SceneCameraBase):
 
     def use_depth_model(self, device: Optional[str] = None) -> None:
         self.fdm.use(device=device)
+
+
+SceneCamera = SceneCameraRaw

@@ -14,6 +14,8 @@ color, depth = cam.capture()
 - `SceneCameraFDM`: FoundationStereo depth from the left/right IR pair, projected
   into the color frame.
 
+`SceneCamera` is kept as a compatibility alias for `SceneCameraRaw`.
+
 ## Install
 Tested with python 3.10 and 3.12. Neither the camera drivers nor the depth models have very stringent requirements, so they should work with most python, torch and Ubuntu version.
 
@@ -67,6 +69,12 @@ with SceneCameraRaw(resolution=(1280, 720)) as cam:
     # depth: float32 depth map in meters, shape (H, W), aligned to color
     print(color.shape, color.dtype)
     print(depth.shape, depth.dtype)
+```
+
+RealSense RS400 visual presets can be passed to the camera classes:
+
+```python
+cam = SceneCameraRaw(visual_preset="high_density")
 ```
 
 With CDM refinement:
