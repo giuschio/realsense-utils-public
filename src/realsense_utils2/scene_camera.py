@@ -55,6 +55,7 @@ class SceneCamera:
         self,
         camera_depth_model: Optional[str] = None,
         resolution: tuple[int, int] = (1280, 720),
+        visual_preset: str = "high_density",
     ):
         """Initialize the camera pipeline and optional depth refinement model.
 
@@ -63,18 +64,24 @@ class SceneCamera:
                 ``camera_depth_models.load_model``. If provided, raw depth is
                 refined on each ``capture()`` call.
             resolution: Requested ``(width, height)`` for both color and depth streams.
+            visual_preset: Name of the ``rs.rs400_visual_preset`` to apply to
+                the depth sensor.
         """
         self.pipeline = None
         self.frame_align = None
         self.depth_scale = None
+        self.depth_visual_preset = None
         self._color_intrinsics: Optional[dict[str, float]] = None
         self.cdm = None
+        self._use_cdm = False
         self.resolution = resolution
+        self.visual_preset = visual_preset
 
         self.initialize()
 
         if camera_depth_model is not None:
             self.cdm = self._load_camera_depth_model(camera_depth_model)
+            self._use_cdm = True
 
     @property
     def width(self) -> int:
@@ -150,20 +157,36 @@ class SceneCamera:
         config.enable_stream(rs.stream.depth, width, height, rs.format.z16, 30)
         profile = self.pipeline.start(config)
         self.frame_align = rs.align(rs.stream.color)
-        self.depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
+        depth_sensor = profile.get_device().first_depth_sensor()
+        self.depth_scale = depth_sensor.get_depth_scale()
+        if depth_sensor.supports(rs.option.visual_preset):
+            try:
+                preset = getattr(rs.rs400_visual_preset, self.visual_preset)
+            except AttributeError as exc:
+                raise ValueError(
+                    f"Unknown RealSense RS400 visual preset: {self.visual_preset!r}"
+                ) from exc
+            try:
+                preset_value = float(preset)
+            except TypeError:
+                if self.visual_preset != "high_density":
+                    raise
+                preset_value = 4.0
+            depth_sensor.set_option(rs.option.visual_preset, preset_value)
+            self.depth_visual_preset = depth_sensor.get_option(rs.option.visual_preset)
 
-        color_sensor = (
+        color_intrinsics = (
             profile.get_stream(rs.stream.color)
             .as_video_stream_profile()
             .get_intrinsics()
         )
         self._color_intrinsics = {
-            "fx": color_sensor.fx,
-            "fy": color_sensor.fy,
-            "cx": color_sensor.ppx,
-            "cy": color_sensor.ppy,
-            "width": color_sensor.width,
-            "height": color_sensor.height,
+            "fx": color_intrinsics.fx,
+            "fy": color_intrinsics.fy,
+            "cx": color_intrinsics.ppx,
+            "cy": color_intrinsics.ppy,
+            "width": color_intrinsics.width,
+            "height": color_intrinsics.height,
         }
 
     def capture(self) -> tuple[np.ndarray, np.ndarray]:
@@ -188,7 +211,7 @@ class SceneCamera:
 
         # Return detached arrays, so upstream operations can't mutate frame-backed memory.
         color, depth = np.copy(color), np.copy(depth)
-        if self.cdm is not None:
+        if self.cdm is not None and self._use_cdm is True:
             depth = self.cdm.infer_depth(color, depth)
         return color, depth
 
@@ -203,11 +226,14 @@ class SceneCamera:
         if self.cdm is not None:
             self.cdm.park()
 
-    def use_depth_model(self, device: Optional[str] = None) -> None:
+    def load_depth_model(self, device: Optional[str] = None) -> None:
         """Move the optional depth model back to its preferred device."""
         if self.cdm is None:
             raise RuntimeError("No camera depth model is configured.")
         self.cdm.use(device=device)
+
+    def set_use_depth_model(self, flag: bool) -> None:
+        self._use_cdm = flag
 
     def __enter__(self) -> "SceneCamera":
         """Context-manager entry; returns this camera instance."""
