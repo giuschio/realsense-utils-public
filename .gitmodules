@@ -3,4 +3,4 @@
 	url = git@github.com:giuschio/camera_depth_models.git
 [submodule "submodules/foundation_stereo"]
 	path = submodules/foundation_stereo
-	url = git@github.com:NVlabs/Fast-FoundationStereo.git
+	url = git@github.com:giuschio/Fast-FoundationStereo.git

@@ -10,7 +10,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class CameraIntrinsics:
-    """Pinhole camera intrinsics."""
+    """Pinhole camera intrinsics with attribute and key access (``K.fx``, ``K["fx"]``)."""
 
     fx: float
     fy: float
@@ -18,6 +18,12 @@ class CameraIntrinsics:
     cy: float
     width: int
     height: int
+
+    def __getitem__(self, key: str) -> float | int:
+        """Return an intrinsic field by name; unknown keys raise ``KeyError``."""
+        if key not in ("fx", "fy", "cx", "cy", "width", "height"):
+            raise KeyError(key)
+        return getattr(self, key)
 
     @classmethod
     def from_realsense(cls, intrinsics: Any) -> "CameraIntrinsics":
