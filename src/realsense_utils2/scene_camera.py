@@ -107,6 +107,25 @@ class SceneCameraBase:
     def capture(self) -> tuple[np.ndarray, np.ndarray]:
         raise NotImplementedError
 
+    def capture_bgr(self) -> np.ndarray:
+        """Capture one color frame as a copied ``uint8`` BGR image.
+
+        This path does not capture, align, refine, or infer depth, so it is
+        suitable for color-only detection and visualization workflows.
+        """
+        if self.pipeline is None:
+            raise RuntimeError("Camera is not initialized.")
+
+        frames = self.pipeline.wait_for_frames()
+        color_frame = frames.get_color_frame()
+        if not color_frame:
+            raise RuntimeError("Failed to capture a color frame.")
+        return np.copy(np.asanyarray(color_frame.get_data()))
+
+    def capture_rgb(self) -> np.ndarray:
+        """Capture one color frame as a copied ``uint8`` RGB image."""
+        return self.capture_bgr()[..., ::-1].copy()
+
     def _apply_visual_preset(self, rs: Any, depth_sensor: Any) -> None:
         """Apply an RS400 visual preset when the connected sensor supports it."""
         if self.visual_preset is None:

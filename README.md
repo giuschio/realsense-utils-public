@@ -8,6 +8,13 @@ The package exposes three camera classes with the same capture API:
 color, depth = cam.capture()
 ```
 
+All three classes also expose color-only paths that skip depth processing:
+
+```python
+color_bgr = cam.capture_bgr()  # native uint8 BGR
+color_rgb = cam.capture_rgb()  # converted uint8 RGB
+```
+
 - `SceneCameraRaw`: native RealSense depth aligned to the color frame.
 - `SceneCameraCDM`: native RealSense depth aligned to color, then refined with
   `camera_depth_models`.
@@ -69,6 +76,14 @@ with SceneCameraRaw(resolution=(1280, 720)) as cam:
     # depth: float32 depth map in meters, shape (H, W), aligned to color
     print(color.shape, color.dtype)
     print(depth.shape, depth.dtype)
+```
+
+For color-only workflows such as AprilTag detection, use `capture_rgb()` so
+CDM/FDM depth inference is not run:
+
+```python
+with SceneCameraRaw(resolution=(1280, 720)) as cam:
+    color_rgb = cam.capture_rgb()
 ```
 
 RealSense RS400 visual presets can be passed to the camera classes:
