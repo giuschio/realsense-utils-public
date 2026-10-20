@@ -71,10 +71,12 @@ class SceneCameraBase:
         self,
         resolution: tuple[int, int] = (1280, 720),
         visual_preset: Optional[str] = "high_density",
+        serial_number: Optional[str] = None,
     ) -> None:
         self.pipeline = None
         self.resolution = resolution
         self.visual_preset = visual_preset
+        self.serial_number = serial_number
         self.depth_visual_preset: Optional[float] = None
         self._color_intrinsics: Optional[CameraIntrinsics] = None
         self.initialize()
@@ -170,10 +172,15 @@ class SceneCameraRaw(SceneCameraBase):
         self,
         resolution: tuple[int, int] = (1280, 720),
         visual_preset: Optional[str] = "high_density",
+        serial_number: Optional[str] = None,
     ) -> None:
         self.frame_align = None
         self.depth_scale = None
-        super().__init__(resolution=resolution, visual_preset=visual_preset)
+        super().__init__(
+            resolution=resolution,
+            visual_preset=visual_preset,
+            serial_number=serial_number,
+        )
 
     def initialize(self) -> None:
         try:
@@ -186,6 +193,8 @@ class SceneCameraRaw(SceneCameraBase):
 
         self.pipeline = rs.pipeline()
         config = rs.config()
+        if self.serial_number is not None:
+            config.enable_device(self.serial_number)
         width, height = self.resolution
         config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, 30)
         config.enable_stream(rs.stream.depth, width, height, rs.format.z16, 30)
@@ -233,9 +242,14 @@ class SceneCameraCDM(SceneCameraRaw):
         camera_depth_model: str | Path = DEFAULT_CAMERA_DEPTH_MODEL_WEIGHTS,
         resolution: tuple[int, int] = (1280, 720),
         visual_preset: Optional[str] = "high_density",
+        serial_number: Optional[str] = None,
     ) -> None:
         self.cdm: Optional[ManagedDepthModel] = None
-        super().__init__(resolution=resolution, visual_preset=visual_preset)
+        super().__init__(
+            resolution=resolution,
+            visual_preset=visual_preset,
+            serial_number=serial_number,
+        )
         self.cdm = self._load_camera_depth_model(str(camera_depth_model))
 
     def _load_camera_depth_model(self, model_path: str) -> ManagedDepthModel:
@@ -287,23 +301,31 @@ class SceneCameraFDM(SceneCameraBase):
     def __init__(
         self,
         foundation_depth_model: str | Path = DEFAULT_FOUNDATION_STEREO_WEIGHTS,
-        resolution: tuple[int, int] = (1280, 720),
+        color_resolution: tuple[int, int] = (1920, 1080),
+        stereo_resolution: tuple[int, int] = (1280, 720),
         fdm_scale: float = 0.5,
         valid_iters: int = 8,
         max_disp: int = 192,
         device: Optional[str] = None,
         visual_preset: Optional[str] = "high_density",
+        serial_number: Optional[str] = None,
+        managed_fdm: Optional[ManagedFoundationStereo] = None,
     ) -> None:
         self.left_intrinsics: Optional[CameraIntrinsics] = None
         self.color_intrinsics_for_projection: Optional[CameraIntrinsics] = None
         self.left_to_color: Optional[CameraExtrinsics] = None
         self.baseline_m: Optional[float] = None
+        self.stereo_resolution = stereo_resolution
         self.fdm_scale = fdm_scale
         self.device = device
         self.fdm: Optional[ManagedFoundationStereo] = None
-        super().__init__(resolution=resolution, visual_preset=visual_preset)
+        super().__init__(
+            resolution=color_resolution,
+            visual_preset=visual_preset,
+            serial_number=serial_number,
+        )
         try:
-            self.fdm = ManagedFoundationStereo(
+            self.fdm = managed_fdm or ManagedFoundationStereo(
                 model_path=foundation_depth_model,
                 preferred_device=device,
                 valid_iters=valid_iters,
@@ -325,10 +347,33 @@ class SceneCameraFDM(SceneCameraBase):
 
         self.pipeline = rs.pipeline()
         config = rs.config()
-        width, height = self.resolution
-        config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, 30)
-        config.enable_stream(rs.stream.infrared, 1, width, height, rs.format.y8, 30)
-        config.enable_stream(rs.stream.infrared, 2, width, height, rs.format.y8, 30)
+        if self.serial_number is not None:
+            config.enable_device(self.serial_number)
+        color_width, color_height = self.resolution
+        stereo_width, stereo_height = self.stereo_resolution
+        config.enable_stream(
+            rs.stream.color,
+            color_width,
+            color_height,
+            rs.format.bgr8,
+            30,
+        )
+        config.enable_stream(
+            rs.stream.infrared,
+            1,
+            stereo_width,
+            stereo_height,
+            rs.format.y8,
+            30,
+        )
+        config.enable_stream(
+            rs.stream.infrared,
+            2,
+            stereo_width,
+            stereo_height,
+            rs.format.y8,
+            30,
+        )
         profile = self.pipeline.start(config)
         self._apply_visual_preset(rs, profile.get_device().first_depth_sensor())
 
